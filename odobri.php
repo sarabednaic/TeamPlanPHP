@@ -1,68 +1,109 @@
 <?php
+//započinjanje sesije
 session_start();
-
 //provjera da li je submitan ID zadatka
 if (!isset($_POST["id"])) {
     header("Location: dashboard.php");
     exit();
 }
 
-//postavi ID zadatka u varijablu
-$id = $_POST["id"];
+//ID zadatka koji se odobrava
+$zadatak_id = $_POST["id"];
 
-//putanja do XML-a i DSN driver fajla
+//putanja do XML međuspremnika
 $xmlPath = "Zadatak.xml";
-$dsnFile = "C:\\TeamPlanDB.dsn";
-
-//učitati XML koristeći DOMDocument(lakše za brisanje objekata iz XML fajla)
+//driverov DSN file za povezivanje na Access bazu 
+$dsnFile = "C:\\TeamPlanDBProba.dsn";
+//učitaj XML dokumenta u DOM objekte
 $dom = new DOMDocument();
-//formatira XML fajla kod spremanja
-$dom->formatOutput = true;
-//učitati XML fajl u ovaj objekt
 $dom->load($xmlPath);
+$dom->formatOutput = true;
+$zadaci = $dom->getElementsByTagName("Zadatak");
 
-//konekcija na access bazu
+//povezivanje na bazu
 try {
-    //PHP data objects -> DSN fajl, username, lozinka
     $pdo = new PDO("odbc:FILEDSN=$dsnFile;", '', '');
-} catch (PDOException $greska) {
-    echo "Došlo je do greške u bazi kod povezivanja na bazu.";
-    exit();
+    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+} catch (PDOException $e) {
+    die("Greška kod spajanja na bazu.");
 }
 
-//u varijablu zadaci postavi listu objekata zadatak iz XML fajla
-$zadaci = $dom->getElementsByTagName("Zadatak");
+//formatiraj datuma za Access: iz YYYY-MM-DD u MM/DD/YYYY
+function formatDatuma($date) {
+    $timestamp = strtotime($date);
+    return date("m/d/Y", $timestamp);
+}
 
 //iteracija kroz zadatke
 foreach ($zadaci as $zadatak) {
-    //iz svakog zadatka dohvaća vrijednost ID-a i nodeValue uzima tekst unutar taga id
-    $trenutniId = $zadatak->getElementsByTagName("ID")[0]->nodeValue;
-
-    //ako je to isti id kao onaj submitanog zadatka
-    if ($trenutniId == $id) {
-        //priprema podataka za bazu
+    //ako zadatak ima naš zadani ID spremi njegove vrijednosti u varijable
+    if ($zadatak->getElementsByTagName("ID")[0]->nodeValue == $zadatak_id) {
         $naziv = $zadatak->getElementsByTagName("Naziv")[0]->nodeValue;
         $opis = $zadatak->getElementsByTagName("Opis")[0]->nodeValue;
-        $pocetak = $zadatak->getElementsByTagName("Vrijeme_pocetak")[0]->nodeValue;
-        $kraj = $zadatak->getElementsByTagName("Vrijeme_kraj")[0]->nodeValue;
+        $pocetak = formatDatuma($zadatak->getElementsByTagName("Vrijeme_pocetak")[0]->nodeValue);
+        $kraj = formatDatuma($zadatak->getElementsByTagName("Vrijeme_kraj")[0]->nodeValue);
 
-        //upis u bazu
-        try {
-            $upit = $pdo->prepare("UPDATE zadatak SET naziv = ?, opis = ?, vrijeme_pocetak = ?, vrijeme_kraj = ? WHERE id = ?");
-            $upit->execute([$naziv, $opis, $pocetak, $kraj, $id]);
-        } catch (PDOException $greska) {
-            echo "Došlo je do greške kod upisa u bazu.";
-            exit();
-        }        
+        //ažuriraj zadatak u bazi
+        $updateUpit = $pdo->prepare("UPDATE zadatak SET naziv = ?, opis = ?, vrijeme_pocetak = ?, vrijeme_kraj = ? WHERE ID = ?");
+        $updateUpit->execute([$naziv, $opis, $pocetak, $kraj, $zadatak_id]);
 
-        //ukloni trenutno updateani zadatak iz XML-a
+        //dodaj članove
+        $dodani = $zadatak->getElementsByTagName("Dodani_clanovi")[0];
+        if ($dodani) {
+            foreach ($dodani->getElementsByTagName("Clan") as $clan) {
+                $clan_id = $clan->getElementsByTagName("ID_clana")[0]->nodeValue;
+
+                //postoji li veza između korisnika i projekta
+                $clan_projekta = $pdo->prepare("SELECT ID FROM clanovi_projekta WHERE korisnik_ID = ? AND projekt_ID = (SELECT projekt_ID FROM zadatak WHERE ID = ?)");
+
+                $clan_projekta->execute([$clan_id, $zadatak_id]);
+                $clanProjekt = $clan_projekta->fetch(PDO::FETCH_ASSOC);
+
+                if ($clanProjekt) {
+                    $clan_projekta_id = $clanProjekt['ID'];
+
+                    //postoji li već veza između člana projekta i zadatka
+                    $check = $pdo->prepare("SELECT COUNT(*) FROM clanovi_zadatka WHERE clan_projekta_ID = ? AND zadatak_ID = ?");
+                    $check->execute([$clan_projekta_id, $zadatak_id]);
+
+                    if ($check->fetchColumn() == 0) {
+                        //ubacivanje nove veze
+                        $insert = $pdo->prepare("INSERT INTO clanovi_zadatka (clan_projekta_ID, zadatak_ID) VALUES (?, ?)");
+                        $insert->execute([$clan_projekta_id, $zadatak_id]);
+                    }
+                }
+            }
+        }
+
+        //izbriši članove
+        $izbrisani = $zadatak->getElementsByTagName("Izbrisani_clanovi")[0];
+        if ($izbrisani) {
+            foreach ($izbrisani->getElementsByTagName("Clan") as $clan) {
+                $clan_id = $clan->getElementsByTagName("ID_clana")[0]->nodeValue;
+
+                //pronađi ID veze u tablici clanovi_projekta
+                $clan_projekta = $pdo->prepare("SELECT ID FROM clanovi_projekta WHERE korisnik_ID = ? AND ID IN (SELECT clan_projekta_ID FROM clanovi_zadatka WHERE zadatak_ID=?)");
+                $clan_projekta->execute([$clan_id, $zadatak_id]); 
+                $clanProjekt = $clan_projekta->fetch(PDO::FETCH_ASSOC);
+
+                if ($clanProjekt) {
+                    $clan_projekta_id = $clanProjekt['ID'];
+                    //briši iz tablice clanovi_zadatka ako postoji
+                    $delete = $pdo->prepare("DELETE FROM clanovi_zadatka WHERE clan_projekta_ID = ? AND zadatak_ID = ?");
+                    $delete->execute([$clan_projekta_id, $zadatak_id]);
+                }
+            }
+        }
+
+        //ukloni zadatak iz XML-a
         $zadatak->parentNode->removeChild($zadatak);
         $dom->save($xmlPath);
-        break;
+
+        break; //prekini jer smo pronašli odgovarajući zadatak
     }
 }
 
-//vrati korisnika na dashboard
+//preusmjeri na natrag na dashboard
 header("Location: dashboard.php");
 exit();
 ?>
