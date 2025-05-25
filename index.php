@@ -1,56 +1,64 @@
 <?php
-//otvaranje korisničke sesije
+//pokretanje sesije
 session_start();
+//varijabla za ispis greške ak do nje dođe
+$error = "";
 
-//funkcija za hashiranje lozinke sa soli kao ona u .NET-u (koristeći SHA256 i Base64)
+//dodavanje soli i hashiranje unesene lozinke
 function sazimanje($lozinka, $sol) {
-    //spajanje lozinke sa soli
     $lozinkaSol = $lozinka . $sol;
-
-    //hashiranje
     $hashiranje = hash('sha256', $lozinkaSol, true);
-
-    //usporedba lozinke korisnika sa dobivenog hashiranom lozinkom sa soli
     return base64_encode($hashiranje);
 }
 
-//varijabla za error, ako dođe do pogreške
-$error = null;
+//driverov DSN file za povezivanje na Access bazu 
+$dsnFile = "C:\\TeamPlanDB.dsn";
 
-//ako je forma submitana
+//povezivanje na bazu => PDO=PHP Data Objects
+try {
+    $pdo = new PDO("odbc:FILEDSN=$dsnFile;", '', '');
+    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+} catch (PDOException $e) {
+    die("Greška kod spajanja na bazu.");
+}
+
+//prijava
 if (isset($_POST['login'])) {
-    //ucitati XML dokument i pretvoriti sadrzaj u objekte admin
-    $xml = simplexml_load_file("C:\\admini.xml");
-    //postavljanje podataka iz textboxeva u varijable
+    //prebacivanje korisnickog imena i lozinke u varijable
     $username = $_POST["username"];
     $password = $_POST["password"];
-    //varijabla za uspjesnu prijavu
-    $prijavaUspjesna = false;
+    //upit za dohvat admina koji provjerava da li je osoba sa ovim korisnickim imenom na nekom projektu admin
+    $sql = "SELECT korisnik.ID, korisnik.ime, korisnik.prezime, korisnik.korisnicko_ime, korisnik.lozinka AS lozinka_hash, korisnik.sol
+            FROM korisnik
+            INNER JOIN clanovi_projekta ON korisnik.ID = clanovi_projekta.korisnik_ID
+            WHERE clanovi_projekta.admin = TRUE AND korisnik.korisnicko_ime = ?";
+    //PHP document object priprema upit za bazu
+    $admin_info = $pdo->prepare($sql);
+    //izvršava upit sa korisnickim imenom
+    $admin_info->execute([$username]);
+    //uzima prvi redak rezultata upita i sprema ga u objekt admin
+    $admin = $admin_info->fetch(PDO::FETCH_ASSOC);
 
-    //iteracija kroz sve admine
-    foreach ($xml->Admin as $admin) {
-        //ako se korisničko ime podudara
-        if ((string)$admin->KorisnickoIme === $username) {
-            //postavi sol iz XML-a u varijablu
-            $salt = (string)$admin->Sol;
-            //odredi hshiranu lozinku
-            $hashiranaLozinka = sazimanje($password, $salt);
-
-            //ako se hash lozinke podudaraju
-            if ($hashiranaLozinka === (string)$admin->Lozinka) {
-                //prijava uspješna i sprema korisnika u sesiju
-                $_SESSION["username"] = $username;
-                $_SESSION["name"] = (string)$admin->Ime;
-                $_SESSION["surname"] = (string)$admin->Prezime;
-                //header funkcija koja preusmjerava korisnika na dashboard.php
-                header("Location: dashboard.php"); 
-                //izlazi iz PHP koda
-                exit();
-            }
+    //ako postoji rezultat upita
+    if ($admin) {
+        //sprema sol za danog admina u bazu
+        $salt = $admin["sol"];
+        //dodaj sol i hashira lozinku u funkciji sazimanje
+        $uneseniHash = sazimanje($password, $salt);
+        //ako je obrađeni hash ove lozinke isti kao i onaj u bazi
+        if ($uneseniHash === $admin["lozinka_hash"]) {
+            //spremanje sesije
+            $_SESSION["username"] = $admin["korisnicko_ime"];
+            $_SESSION["name"] = $admin["ime"];
+            $_SESSION["surname"] = $admin["prezime"];
+            $_SESSION["admin_id"] = $admin["ID"];
+            //prebaci na dashboard sa zadacima
+            header("Location: dashboard.php");
+            //izađi iz koda
+            exit();
         }
     }
-
-    //ako prijava nije uspješna, prikaži grešku
+    //neuspješna prijava
     $error = "Neispravno korisničko ime ili lozinka!";
 }
 ?>
@@ -70,15 +78,11 @@ if (isset($_POST['login'])) {
         <form method="post">
             <label>Korisničko ime:</label><br>
             <input type="text" name="username" required><br><br>
-
-            <label>Lozinka:</label><br>
-            <input type="password" name="password" required><br><br>
-
-            <button type="submit" name="login">Prijava</button>
-        </form>
-        <?php if (isset($error)) {
-            echo "<p style='color:red;'>$error</p>"; 
-        }?>
-    </main>
-</body>
-</html>
+<label>Lozinka:</label><br>
+        <input type="password" name="password" required><br><br>
+        <button type="submit" name="login">Prijava</button>
+    </form>
+    <?php if (isset($error)) {
+        echo "<p style='color:red;'>$error</p>"; 
+    }?>
+</main>
